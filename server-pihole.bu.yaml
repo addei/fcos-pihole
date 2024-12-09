@@ -1,0 +1,167 @@
+## server-pihole.bu.yaml ##
+## install fcos pihole automatically ##
+variant: fcos
+version: 1.5.0
+passwd:
+  users:
+    - name: < username >
+      groups: ["wheel", "sudo"]
+      ssh_authorized_keys:
+        - ssh-ed25519 < ssh public key >
+    - name: pihole
+    - name: root
+      ssh_authorized_keys:
+        - ssh-ed25519 < ssh public key >   
+storage:
+  disks:
+    - device: /dev/disk/by-id/coreos-boot-disk
+      wipe_table: false
+      partitions:
+      - number: 4
+        label: root
+        size_mib: 8192
+        resize: true
+      - label: var  # not specifying "number", so this will go after the root partition
+        size_mib: 0 # means "use the rest of the space on the disk"
+  filesystems:
+    - path: /var
+      device: /dev/disk/by-partlabel/var
+      format: xfs
+      wipe_filesystem: false # preserve /var on reinstall (this is the default, but be explicit)
+      with_mount_unit: true  # mount this filesystem in the real root
+  files:
+    - path: /etc/sysctl.d/pihole.conf
+      mode: 0644
+      contents:
+        inline: |
+          net.ipv4.ip_unprivileged_port_start=53
+    - path: /var/lib/systemd/linger/pihole # enable lingering for pihole user
+      mode: 0644
+    - path: /etc/systemd/resolved.conf # Disable systemd-resolver DNStubListener option
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: |
+          [Resolve]
+          DNSStubListener=no
+        # Set up an an environment file that containers can read to configure themselves.
+    - path: /home/pihole/.config/containers/containers-environment # create env paramaters file for the pihole instance
+      mode: 0644
+      user:
+        name: pihole
+      group:
+        name: pihole
+      contents:
+        inline: |
+          TZ=Europe/Helsinki
+          VIRTUAL_HOST=< containerhostname.domain >
+          PROXY_LOCATION=< containerhostname.domain >
+          FTLCONF_LOCAL_IPV4=127.0.0.1
+          DHCP_ACTIVE=false          
+    - path: /home/pihole/.config/containers/systemd/pihole.container # create container file for the custom systemd engine to enable pihole container instance
+      mode: 0644
+      user:
+        name: pihole
+      group:
+        name: pihole
+      contents:
+        inline: |
+          [Unit]
+          Description=pihole container
+          Wants=network-online.target
+          After=network-online.target
+  
+          [Container]
+          # Use the pihole:latest image
+          Image=docker.io/pihole/pihole:latest
+          
+          # Name for the container
+          ContainerName=pihole-1
+  
+          # Hostname
+          HostName=< containerhostname.domain >
+  
+          # DNS settings for the container
+          DNS=127.0.0.1
+          DNS=1.1.1.1
+  
+          # Use volumes defined below for persistent data
+          Volume=/opt/pihole/etc-pihole:/etc/pihole:z
+          Volume=/opt/pihole/etc-dnsmasq.d:/etc/dnsmasq.d:z
+  
+          # Environment flags
+          EnvironmentFile=/home/pihole/.config/containers/containers-environment
+          
+          # Expose services
+          PublishPort=53:53/tcp
+          PublishPort=53:53/udp
+          PublishPort=80:80
+  
+          [Service]
+          # Restart service when sleep finishes
+          Restart=always
+  
+          [Install]
+          # Start by default on boot
+          WantedBy=multi-user.target default.target
+  directories:
+    - path: /opt/pihole
+      mode: 0744
+      user:
+        name: pihole
+      group:
+        name: pihole
+    - path: /opt/pihole/etc-pihole
+      mode: 0766
+      user:
+        name: pihole
+      group:
+        name: pihole
+    - path: /opt/pihole/etc-dnsmasq.d
+      mode: 0777
+      user:
+        name: pihole
+      group:
+        name: pihole
+    - path: /home/pihole/.config
+      user:
+        name: pihole
+      group:
+        name: pihole
+    - path: /home/pihole/.config/containers
+      user:
+        name: pihole
+      group:
+        name: pihole
+    - path: /home/pihole/.config/containers/systemd
+      user:
+        name: pihole
+      group:
+        name: pihole
+systemd:
+  units:
+    - name: rpm-ostree-install-qemu-guest-agent.service # install qemu-guest-agent for virtualization guest lifecycle support from host
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Layer qemu-guest-agent with rpm-ostree
+        Wants=network-online.target
+        After=network-online.target
+        # We run before `zincati.service` to avoid conflicting rpm-ostree
+        # transactions.
+        Before=zincati.service
+        ConditionPathExists=!/var/lib/%N.stamp
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        # `--allow-inactive` ensures that rpm-ostree does not return an error
+        # if the package is already installed. This is useful if the package is
+        # added to the root image in a future Fedora CoreOS release as it will
+        # prevent the service from failing.
+        ExecStart=/usr/bin/rpm-ostree install -y --allow-inactive qemu-guest-agent
+        ExecStart=/bin/touch /var/lib/%N.stamp
+        ExecStart=/bin/systemctl --no-block reboot
+
+        [Install]
+        WantedBy=multi-user.target
